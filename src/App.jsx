@@ -784,7 +784,23 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
 // ═══════════════════════════════════════════════════════════════
 // AUTHORITY PANEL
 // ═══════════════════════════════════════════════════════════════
-function AuthorityPanel({ pulse, cascadeEvents, onReport }) {
+function AuthorityPanel({ pulse, cascadeEvents, onReport, onLockdown, onBroadcast }) {
+  const [actionStatus, setActionStatus] = useState('')
+  const [loading, setLoading] = useState('')
+
+  const handleAction = async (action, handler) => {
+    setLoading(action)
+    setActionStatus('')
+    try {
+      const result = await handler()
+      setActionStatus(result?.success ? `✅ ${action} — sent to Telegram!` : `❌ ${action} failed`)
+    } catch (e) {
+      setActionStatus(`❌ ${action} error: ${e.message}`)
+    } finally {
+      setLoading('')
+    }
+  }
+
   return (
     <section className="section" id="authority">
       <div className="section-header">
@@ -815,11 +831,22 @@ function AuthorityPanel({ pulse, cascadeEvents, onReport }) {
         <div className="glass-card" style={{ padding: 24 }}>
           <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 16 }}>Quick Actions</h3>
           <div style={{ display: 'grid', gap: 12 }}>
-            <button className="btn btn-primary" onClick={onReport} style={{ width: '100%' }}>📊 Generate Incident Report</button>
-            <button className="btn btn-outline" style={{ width: '100%' }}>🔒 Initiate Zone Lockdown</button>
-            <button className="btn btn-outline" style={{ width: '100%' }}>📡 Broadcast Public Alert</button>
+            <button className="btn btn-primary" onClick={() => handleAction('Report', onReport)} style={{ width: '100%' }} disabled={loading === 'Report'}>
+              {loading === 'Report' ? '⏳ Sending...' : '📊 Generate Incident Report'}
+            </button>
+            <button className="btn btn-outline" onClick={() => handleAction('Lockdown', onLockdown)} style={{ width: '100%', borderColor: '#ef4444', color: '#ef4444' }} disabled={loading === 'Lockdown'}>
+              {loading === 'Lockdown' ? '⏳ Sending...' : '🔒 Initiate Zone Lockdown'}
+            </button>
+            <button className="btn btn-outline" onClick={() => handleAction('Broadcast', onBroadcast)} style={{ width: '100%', borderColor: '#f97316', color: '#f97316' }} disabled={loading === 'Broadcast'}>
+              {loading === 'Broadcast' ? '⏳ Sending...' : '📡 Broadcast Public Alert'}
+            </button>
           </div>
-          <div style={{ marginTop: 20, fontSize: 11, color: 'var(--text-muted)' }}>
+          {actionStatus && (
+            <div style={{ marginTop: 16, padding: '10px 14px', background: actionStatus.startsWith('✅') ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', borderRadius: 8, fontSize: 12, fontWeight: 600, color: actionStatus.startsWith('✅') ? 'var(--accent)' : 'var(--danger)' }}>
+              {actionStatus}
+            </div>
+          )}
+          <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text-muted)' }}>
             Recent cascade events: {cascadeEvents.length}
           </div>
         </div>
@@ -1043,8 +1070,52 @@ function App() {
 
   const generateReport = async () => {
     try {
-      await fetch(`${API}/api/report/generate`, { method: 'POST' })
-    } catch { console.log('[AURA] Report failed') }
+      const resp = await fetch(`${API}/api/report/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pulse_score: pulse.score,
+          health: pulse.health,
+          mobility: pulse.mobility,
+          security: pulse.security,
+          environment: pulse.environment,
+          total_events: cascadeEvents.length,
+          location: userLocation
+        })
+      })
+      return await resp.json()
+    } catch (e) {
+      console.error('[AURA] Report failed:', e)
+      return { success: false }
+    }
+  }
+
+  const initiateLockdown = async () => {
+    try {
+      const resp = await fetch(`${API}/api/authority/lockdown`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ location: userLocation })
+      })
+      return await resp.json()
+    } catch (e) {
+      console.error('[AURA] Lockdown failed:', e)
+      return { success: false }
+    }
+  }
+
+  const broadcastAlert = async () => {
+    try {
+      const resp = await fetch(`${API}/api/authority/broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ location: userLocation })
+      })
+      return await resp.json()
+    } catch (e) {
+      console.error('[AURA] Broadcast failed:', e)
+      return { success: false }
+    }
   }
 
   return (
@@ -1073,7 +1144,7 @@ function App() {
               addCascadeEvent={addCascadeEvent}
             />
           )}
-          {activeSection === 'authority' && <AuthorityPanel pulse={pulse} cascadeEvents={cascadeEvents} onReport={generateReport} />}
+          {activeSection === 'authority' && <AuthorityPanel pulse={pulse} cascadeEvents={cascadeEvents} onReport={generateReport} onLockdown={initiateLockdown} onBroadcast={broadcastAlert} />}
           {activeSection === 'guide' && <SetupGuide />}
         </main>
       </div>

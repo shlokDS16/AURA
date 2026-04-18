@@ -5,3 +5,6 @@ dist/
 __pycache__/
 *.pyc
 .vercel/
+
+.vercel
+set_env.ps1
