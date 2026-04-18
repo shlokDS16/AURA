@@ -909,31 +909,53 @@ function SetupGuide() {
 
         {/* ngrok Guide */}
         <div className="glass-card" style={{ padding: 24 }}>
-          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>📱 Live Camera Feed via ngrok</h3>
+          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>📱 Live Camera Feed via Tunnel</h3>
           <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--text-secondary)' }}>
-            <p style={{ marginBottom: 12 }}>To stream your phone's camera in real-time:</p>
+            <p style={{ marginBottom: 12 }}>To stream your phone's camera to AURA for real-time Gemma 4 AI analysis:</p>
             
             <div style={{ background: 'rgba(0,0,0,0.3)', padding: 16, borderRadius: 8, fontFamily: 'var(--font-mono)', fontSize: 12, marginBottom: 16 }}>
-              <div style={{ color: 'var(--text-muted)', marginBottom: 8 }}># Step 1: Clone and run the local backend</div>
+              <div style={{ color: 'var(--text-muted)', marginBottom: 8 }}># Step 1: Clone and start the local backend</div>
               <div style={{ color: '#22c55e' }}>git clone https://github.com/shlokDS16/AURA.git</div>
               <div style={{ color: '#22c55e' }}>cd aura3.0/backend</div>
               <div style={{ color: '#22c55e' }}>pip install -r requirements.txt</div>
-              <div style={{ color: '#22c55e' }}>python main.py</div>
               <br />
-              <div style={{ color: 'var(--text-muted)', marginBottom: 8 }}># Step 2: Install and start ngrok</div>
-              <div style={{ color: '#22c55e' }}>ngrok http 8001</div>
+              <div style={{ color: 'var(--text-muted)', marginBottom: 8 }}># On Windows (fix unicode):</div>
+              <div style={{ color: '#22c55e' }}>$env:PYTHONIOENCODING="utf-8"; python -m uvicorn main:app --host 0.0.0.0 --port 8001</div>
               <br />
-              <div style={{ color: 'var(--text-muted)', marginBottom: 8 }}># Or use localtunnel (no signup needed)</div>
+              <div style={{ color: 'var(--text-muted)', marginBottom: 8 }}># Step 2: Open a tunnel (pick one)</div>
+              <div style={{ color: '#f97316' }}># Option A — localtunnel (free, no signup)</div>
               <div style={{ color: '#22c55e' }}>npx localtunnel --port 8001 --subdomain aura-vision-demo</div>
+              <br />
+              <div style={{ color: '#f97316' }}># Option B — ngrok (faster, requires free account)</div>
+              <div style={{ color: '#22c55e' }}>ngrok http 8001</div>
             </div>
 
-            <p style={{ marginBottom: 12 }}>Then open the ngrok/localtunnel URL + <code>/camera</code> on your phone browser:</p>
+            <div style={{ background: 'rgba(239,68,68,0.1)', padding: 14, borderRadius: 8, marginBottom: 16, borderLeft: '3px solid #ef4444' }}>
+              <div style={{ fontWeight: 700, color: '#ef4444', marginBottom: 6 }}>⚠️ Important: localtunnel Confirmation Page</div>
+              <div style={{ fontSize: 12 }}>
+                When you first open a localtunnel URL, it shows a <strong>"Click to Continue"</strong> page. 
+                You must click the button on that page before the tunnel becomes functional. 
+                This only needs to be done once per session.
+              </div>
+            </div>
+
+            <p style={{ marginBottom: 8, fontWeight: 700 }}>Step 3: Open the camera on your phone</p>
             
-            <div style={{ background: 'rgba(139,92,246,0.1)', padding: 12, borderRadius: 8, fontFamily: 'var(--font-mono)', fontSize: 13, textAlign: 'center' }}>
-              https://your-tunnel-url.ngrok.io<strong>/camera</strong>
+            <div style={{ background: 'rgba(139,92,246,0.1)', padding: 12, borderRadius: 8, fontFamily: 'var(--font-mono)', fontSize: 13, textAlign: 'center', marginBottom: 12 }}>
+              <a href="https://aura-vision-demo.loca.lt/camera" target="_blank" rel="noopener noreferrer" style={{ color: '#a78bfa', textDecoration: 'none' }}>
+                https://aura-vision-demo.loca.lt<strong>/camera</strong>
+              </a>
             </div>
 
-            <p style={{ marginTop: 16 }}>This streams frames directly to the AURA backend for Gemma 4 analysis. Detection alerts, Telegram messages, and AI phone calls all fire automatically.</p>
+            <div style={{ background: 'rgba(34,197,94,0.08)', padding: 12, borderRadius: 8, fontSize: 12, marginBottom: 12 }}>
+              <strong style={{ color: 'var(--accent)' }}>How it works:</strong> Your phone camera streams frames → localtunnel routes to your PC → 
+              Ollama Gemma 4 analyzes each frame → threats auto-trigger Telegram alerts + AI voice calls via Twilio.
+            </div>
+
+            <p style={{ marginTop: 12 }}>
+              <strong>Dashboard:</strong> Open <a href="https://aura-vision-demo.loca.lt/ws/dashboard" target="_blank" rel="noopener noreferrer" style={{ color: '#a78bfa' }}>the dashboard WebSocket</a> in your browser to see the live detection feed. 
+              Or use this Vercel-hosted site locally at <code>localhost:5173</code> while the backend runs on <code>:8001</code>.
+            </p>
           </div>
         </div>
 
