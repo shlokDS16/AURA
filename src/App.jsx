@@ -439,6 +439,9 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
   const [uploading, setUploading] = useState(false)
   const [showLocationModal, setShowLocationModal] = useState(false)
   const [analysisLog, setAnalysisLog] = useState('')
+  const [tunnelUrl, setTunnelUrl] = useState(() => localStorage.getItem('aura_tunnel_url') || 'https://aura-vision-demo.loca.lt')
+  const [tunnelConnected, setTunnelConnected] = useState(false)
+  const reconnectTimerRef = useRef(null)
 
   useEffect(() => {
     if (!lastDetection && detections.length > 0) {
@@ -450,54 +453,112 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
   const [locInput, setLocInput] = useState(userLocation)
   const fileRef = useRef(null)
 
-  // WebSocket for live stream — only on localhost
-  useEffect(() => {
-    if (!IS_LOCAL) {
-      setStreamStatus('cloud')
-      setCameraUrl('Upload images or use camera capture below')
-      return
-    }
-
-    let ws; let reconnectTimer
-    const connect = () => {
-      setStreamStatus('connecting')
-      ws = new WebSocket(`ws://${window.location.hostname}:8001/ws/dashboard`)
-      wsRef.current = ws
-      ws.onopen = () => setStreamStatus('no_phone')
-      ws.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-        if (!data.frame) {
-          if (data.cascade?.hud_extra) { setLastDetection({ ...data.detection, hud: data.cascade.hud_extra }); onDetect && onDetect() }
-          return
-        }
-        setStreamStatus('live'); setFrameCount(c => c + 1)
-        const canvas = canvasRef.current; if (!canvas) return
-        const ctx = canvas.getContext('2d'); const img = new Image()
-        img.onload = () => {
-          canvas.width = img.width || 640; canvas.height = img.height || 480; ctx.drawImage(img, 0, 0)
-          if (data.detection?.bbox?.length === 4) {
-            const [x1, y1, x2, y2] = data.detection.bbox
-            ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3; ctx.strokeRect(x1*(canvas.width/640), y1*(canvas.height/480), (x2-x1)*(canvas.width/640), (y2-y1)*(canvas.height/480))
-          }
-        }
-        img.src = 'data:image/jpeg;base64,' + data.frame
-        if (data.detection) {
-          setLastDetection(prev => {
-            const now = Date.now()
-            const lastWasCritical = prev && prev.severity !== 'safe'
-            const justHappened = prev?.lastUpdate && (now - prev.lastUpdate < 5000)
-            if (data.detection.severity === 'safe' && lastWasCritical && justHappened) return prev
-            const newHud = data.cascade?.hud_extra || (data.detection.severity === 'safe' ? prev?.hud : undefined)
-            return { ...data.detection, hud: newHud, lastUpdate: now }
-          })
-          if (data.detection.severity !== 'safe') onDetect && onDetect()
+  // ── Handle incoming WS message (shared by both local and tunnel modes) ──
+  const handleWsMessage = useCallback((e) => {
+    try {
+      const data = JSON.parse(e.data)
+      if (!data.frame) {
+        if (data.cascade?.hud_extra) { setLastDetection({ ...data.detection, hud: data.cascade.hud_extra }); onDetect && onDetect() }
+        return
+      }
+      setStreamStatus('live'); setFrameCount(c => c + 1)
+      const canvas = canvasRef.current; if (!canvas) return
+      const ctx = canvas.getContext('2d'); const img = new Image()
+      img.onload = () => {
+        canvas.width = img.width || 640; canvas.height = img.height || 480; ctx.drawImage(img, 0, 0)
+        if (data.detection?.bbox?.length === 4) {
+          const [x1, y1, x2, y2] = data.detection.bbox
+          ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3; ctx.strokeRect(x1*(canvas.width/640), y1*(canvas.height/480), (x2-x1)*(canvas.width/640), (y2-y1)*(canvas.height/480))
         }
       }
-      ws.onclose = () => { setStreamStatus('disconnected'); reconnectTimer = setTimeout(connect, 3000) }
+      img.src = 'data:image/jpeg;base64,' + data.frame
+      if (data.detection) {
+        setLastDetection(prev => {
+          const now = Date.now()
+          const lastWasCritical = prev && prev.severity !== 'safe'
+          const justHappened = prev?.lastUpdate && (now - prev.lastUpdate < 5000)
+          if (data.detection.severity === 'safe' && lastWasCritical && justHappened) return prev
+          const newHud = data.cascade?.hud_extra || (data.detection.severity === 'safe' ? prev?.hud : undefined)
+          return { ...data.detection, hud: newHud, lastUpdate: now }
+        })
+        if (data.detection.severity !== 'safe') onDetect && onDetect()
+      }
+    } catch (err) {
+      console.log('[AURA WS] Parse error:', err)
     }
-    connect()
-    return () => { clearTimeout(reconnectTimer); ws?.close() }
-  }, [onDetect])
+  }, [onDetect, setLastDetection])
+
+  // ── Connect to tunnel (used in cloud mode) ──
+  const connectToTunnel = useCallback(() => {
+    // Clean up existing connection
+    if (wsRef.current) { try { wsRef.current.close() } catch {} }
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+
+    const cleanUrl = tunnelUrl.replace(/\/+$/, '') // strip trailing slash
+    localStorage.setItem('aura_tunnel_url', cleanUrl)
+
+    // Convert http(s) URL to ws(s) URL
+    const wsUrl = cleanUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/ws/dashboard'
+    console.log('[AURA] Connecting to tunnel WS:', wsUrl)
+    setStreamStatus('connecting')
+    setAnalysisLog(`Connecting to ${cleanUrl}...`)
+
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setStreamStatus('no_phone')
+      setTunnelConnected(true)
+      setAnalysisLog(`✅ Connected to backend via tunnel! Waiting for phone camera feed...`)
+      console.log('[AURA] Tunnel WS connected')
+    }
+    ws.onmessage = handleWsMessage
+    ws.onerror = (err) => {
+      console.log('[AURA] Tunnel WS error:', err)
+      setAnalysisLog(`❌ Connection failed. Make sure backend + localtunnel are running, and you've clicked "Continue" on the localtunnel page.`)
+    }
+    ws.onclose = () => {
+      console.log('[AURA] Tunnel WS closed')
+      if (tunnelConnected) {
+        setStreamStatus('disconnected')
+        setAnalysisLog('⚠️ Tunnel disconnected. Attempting reconnect in 5s...')
+        reconnectTimerRef.current = setTimeout(() => {
+          if (tunnelConnected) connectToTunnel()
+        }, 5000)
+      }
+    }
+  }, [tunnelUrl, tunnelConnected, handleWsMessage])
+
+  const disconnectTunnel = useCallback(() => {
+    setTunnelConnected(false)
+    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    setStreamStatus('cloud')
+    setAnalysisLog('')
+    setFrameCount(0)
+  }, [])
+
+  // WebSocket for live stream
+  useEffect(() => {
+    if (IS_LOCAL) {
+      // Local mode — connect directly to localhost:8001
+      let ws; let reconnectTimer
+      const connect = () => {
+        setStreamStatus('connecting')
+        ws = new WebSocket(`ws://${window.location.hostname}:8001/ws/dashboard`)
+        wsRef.current = ws
+        ws.onopen = () => setStreamStatus('no_phone')
+        ws.onmessage = handleWsMessage
+        ws.onclose = () => { setStreamStatus('disconnected'); reconnectTimer = setTimeout(connect, 3000) }
+      }
+      connect()
+      return () => { clearTimeout(reconnectTimer); ws?.close() }
+    } else {
+      // Cloud mode — wait for manual tunnel connection
+      setStreamStatus('cloud')
+      setCameraUrl('Connect to your local backend tunnel below, or upload images for Puter.js analysis')
+    }
+  }, [handleWsMessage])
 
   // ── Upload Handler: Dual Mode ──
   const handleUpload = async (e) => {
@@ -648,20 +709,27 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
           <div className="stream-panel">
             <div className="stream-header" style={{ justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div className={`status-dot ${streamStatus === 'live' ? 'online' : ''}`}></div>
-                <span style={{ fontWeight: 800 }}>{IS_LOCAL ? 'LIVE_VIDEO_FEED' : 'CLOUD_VISION_ANALYSIS'}</span>
+                <div className={`status-dot ${streamStatus === 'live' ? 'online' : (tunnelConnected ? 'online' : '')}`}></div>
+                <span style={{ fontWeight: 800 }}>{streamStatus === 'live' ? 'LIVE_VIDEO_FEED' : (tunnelConnected ? 'TUNNEL_CONNECTED' : (IS_LOCAL ? 'LIVE_VIDEO_FEED' : 'CLOUD_VISION'))}</span>
               </div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                {frameCount} FRAMES · {IS_LOCAL ? 'G4' : 'GPT-5.4'} · {streamStatus.toUpperCase()}
+                {frameCount} FRAMES · {tunnelConnected ? 'GEMMA4' : (IS_LOCAL ? 'G4' : 'PUTER.JS')} · {streamStatus.toUpperCase()}
               </div>
             </div>
             <div style={{ background: '#000', borderRadius: '0 0 12px 12px', overflow: 'hidden', aspectRatio: '16/9', position: 'relative' }}>
               <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               {streamStatus !== 'live' && !IS_LOCAL && (
                 <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(4px)' }}>
-                   <div style={{ fontSize: 40, marginBottom: 16 }}>🧠</div>
-                   <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>Upload an image below for Puter.js AI analysis</p>
-                   <p style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 8 }}>Powered by GPT-5.4 Nano — runs in your browser</p>
+                   <div style={{ fontSize: 40, marginBottom: 16 }}>{tunnelConnected ? '📡' : '🧠'}</div>
+                   <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
+                     {tunnelConnected 
+                       ? (streamStatus === 'connecting' ? 'Connecting to tunnel...' : 'Waiting for phone camera feed...')
+                       : 'Connect to tunnel below for live feed, or upload an image'
+                     }
+                   </p>
+                   <p style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 8 }}>
+                     {tunnelConnected ? 'Open /camera on your phone to start streaming' : 'Powered by Puter.js + Gemma 4 via tunnel'}
+                   </p>
                 </div>
               )}
               {streamStatus !== 'live' && IS_LOCAL && (
@@ -672,6 +740,42 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
               )}
             </div>
           </div>
+
+          {/* Tunnel Connection Panel — Cloud Mode */}
+          {!IS_LOCAL && (
+            <div className="glass-card" style={{ padding: 20, marginTop: 16, borderColor: tunnelConnected ? 'var(--accent)' : 'rgba(139,92,246,0.3)', borderWidth: 1, borderStyle: 'solid' }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 16 }}>📡</span>
+                Live Feed Connection
+                {tunnelConnected && <span style={{ fontSize: 10, color: 'var(--accent)', background: 'rgba(34,197,94,0.15)', padding: '2px 8px', borderRadius: 99 }}>CONNECTED</span>}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <input
+                  className="input"
+                  value={tunnelUrl}
+                  onChange={e => setTunnelUrl(e.target.value)}
+                  placeholder="https://aura-vision-demo.loca.lt"
+                  style={{ flex: 1, fontSize: 12, fontFamily: 'var(--font-mono)' }}
+                  disabled={tunnelConnected}
+                />
+                {!tunnelConnected ? (
+                  <button className="btn btn-primary" onClick={connectToTunnel} style={{ whiteSpace: 'nowrap' }}>
+                    🔗 Connect
+                  </button>
+                ) : (
+                  <button className="btn btn-outline" onClick={disconnectTunnel} style={{ whiteSpace: 'nowrap', borderColor: '#ef4444', color: '#ef4444' }}>
+                    ✕ Disconnect
+                  </button>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                {!tunnelConnected 
+                  ? <>Enter your localtunnel or ngrok URL. Your local backend must be running on port 8001. Open <code style={{ color: '#a78bfa' }}>/camera</code> on your phone to stream.</>
+                  : <>Live feed active. Frames from your phone are being analyzed by Gemma 4 on your local machine. Threats auto-trigger Telegram + Twilio alerts.</>
+                }
+              </div>
+            </div>
+          )}
 
           {/* Upload + Analysis Log */}
           <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
