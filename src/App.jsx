@@ -489,13 +489,16 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
   }, [onDetect, setLastDetection])
 
   const pollIntervalRef = useRef(null)
+  const lastCascadeTimeRef = useRef(0)
+  const puterAnalyzingRef = useRef(false)
+  const frameCounterRef = useRef(0)
 
-  // ── REST Polling fallback (more reliable than WS through tunnels) ──
+  // ── REST Polling with Puter.js AI analysis on every frame ──
   const startPolling = useCallback((baseUrl) => {
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
     
     let lastTimestamp = ''
-    setAnalysisLog(`📡 Polling live feed from ${baseUrl}...`)
+    setAnalysisLog(`📡 Connecting to live feed at ${baseUrl}...`)
     
     pollIntervalRef.current = setInterval(async () => {
       try {
@@ -509,7 +512,11 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
           lastTimestamp = data.timestamp
           setStreamStatus('live')
           setFrameCount(c => c + 1)
+          frameCounterRef.current++
           
+          const imageDataUrl = 'data:image/jpeg;base64,' + data.frame
+          
+          // Draw frame on canvas
           const canvas = canvasRef.current
           if (canvas && data.frame) {
             const ctx = canvas.getContext('2d')
@@ -518,30 +525,84 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
               canvas.width = img.width || 640
               canvas.height = img.height || 480
               ctx.drawImage(img, 0, 0)
-              if (data.detection?.bbox?.length === 4) {
-                const [x1, y1, x2, y2] = data.detection.bbox
-                ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3
-                ctx.strokeRect(x1*(canvas.width/640), y1*(canvas.height/480), (x2-x1)*(canvas.width/640), (y2-y1)*(canvas.height/480))
-              }
             }
-            img.src = 'data:image/jpeg;base64,' + data.frame
+            img.src = imageDataUrl
           }
           
-          if (data.detection) {
-            setLastDetection(prev => {
-              const now = Date.now()
-              const lastWasCritical = prev && prev.severity !== 'safe'
-              const justHappened = prev?.lastUpdate && (now - prev.lastUpdate < 5000)
-              if (data.detection.severity === 'safe' && lastWasCritical && justHappened) return prev
-              return { ...data.detection, lastUpdate: now }
-            })
-            if (data.detection.severity !== 'safe') onDetect && onDetect()
-          }
-
-          if (data.detection && data.detection.severity !== 'safe') {
-            setAnalysisLog(`🚨 THREAT DETECTED: ${data.detection.label} (${data.detection.severity}) — ${data.detections_count} total detections`)
-          } else {
-            setAnalysisLog(`📡 Live feed active · Frame received · ${data.detections_count || 0} detections`)
+          // ── Run Puter.js AI analysis every 3rd frame ──
+          if (frameCounterRef.current % 3 === 0 && !puterAnalyzingRef.current) {
+            puterAnalyzingRef.current = true
+            setAnalysisLog('🧠 Puter.js analyzing frame...')
+            
+            try {
+              const aiResult = await analyzeWithPuter(imageDataUrl)
+              
+              const det = {
+                id: Math.random().toString(36).slice(2, 10),
+                label: aiResult.label,
+                severity: aiResult.severity,
+                confidence: aiResult.confidence,
+                description: aiResult.description,
+                engine: aiResult.engine,
+                source: 'live_tunnel_puterjs',
+                created_at: new Date().toISOString()
+              }
+              
+              // Update detection state
+              setLastDetection(prev => {
+                const now = Date.now()
+                const lastWasCritical = prev && prev.severity !== 'safe'
+                const justHappened = prev?.lastUpdate && (now - prev.lastUpdate < 5000)
+                if (det.severity === 'safe' && lastWasCritical && justHappened) return prev
+                return { ...det, lastUpdate: now }
+              })
+              
+              if (det.severity !== 'safe') {
+                // 🚨 THREAT DETECTED — trigger cascade (with cooldown)
+                const now = Date.now()
+                onDetect && onDetect()
+                setAnalysisLog(`🚨 THREAT: ${det.label} (${det.severity}) — ${det.description}`)
+                
+                if (now - lastCascadeTimeRef.current > 15000) {
+                  // Trigger Telegram + Twilio via Vercel API
+                  lastCascadeTimeRef.current = now
+                  try {
+                    const cascadeResp = await fetch(`/api/cascade/trigger`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        label: det.label,
+                        severity: det.severity,
+                        confidence: det.confidence,
+                        description: det.description,
+                        location: userLocation,
+                        frame: data.frame
+                      })
+                    })
+                    const cascadeData = await cascadeResp.json()
+                    if (cascadeData.cascade) addCascadeEvent && addCascadeEvent(cascadeData.cascade)
+                    if (cascadeData.detection?.hud) {
+                      setLastDetection(prev => ({ ...prev, hud: cascadeData.detection.hud, lastUpdate: Date.now() }))
+                    }
+                    setAnalysisLog(`🚨 ${det.label} → Telegram + AI Call FIRED!`)
+                  } catch (cascErr) {
+                    console.log('[CASCADE] Error:', cascErr.message)
+                    setAnalysisLog(`🚨 ${det.label} detected! (Alert dispatch error)`)
+                  }
+                } else {
+                  setAnalysisLog(`🚨 ${det.label} — Cooldown active (alerts sent recently)`)
+                }
+              } else {
+                setAnalysisLog(`✅ Scene safe · ${det.description}`)
+              }
+            } catch (puterErr) {
+              console.log('[Puter.js] Analysis error:', puterErr.message)
+              setAnalysisLog(`📡 Live feed active · AI analysis skipped (${puterErr.message})`)
+            } finally {
+              puterAnalyzingRef.current = false
+            }
+          } else if (!puterAnalyzingRef.current) {
+            setAnalysisLog(`📡 Live feed active · ${frameCounterRef.current} frames received`)
           }
         } else if (!data.has_frame) {
           setStreamStatus('no_phone')
@@ -550,8 +611,8 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
       } catch (err) {
         console.log('[AURA Poll] Error:', err.message)
       }
-    }, 600) // Poll every 600ms
-  }, [onDetect, setLastDetection])
+    }, 800) // Poll every 800ms (gives Puter.js time to analyze)
+  }, [onDetect, setLastDetection, userLocation, addCascadeEvent])
 
   // ── Connect to tunnel (used in cloud mode) ──
   const connectToTunnel = useCallback(() => {
@@ -764,8 +825,8 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
           </div>
         </div>
         {!IS_LOCAL && (
-          <div style={{ marginTop: 8, padding: '8px 16px', background: 'rgba(139, 92, 246, 0.15)', borderRadius: 8, fontSize: 12, color: '#a78bfa' }}>
-            🧠 AI Engine: <strong>Puter.js (gpt-5.4-nano)</strong> — runs entirely in your browser, no API keys needed
+          <div style={{ marginTop: 8, padding: '8px 16px', background: tunnelConnected ? 'rgba(34,197,94,0.15)' : 'rgba(139, 92, 246, 0.15)', borderRadius: 8, fontSize: 12, color: tunnelConnected ? '#4ade80' : '#a78bfa' }}>
+            🧠 AI Engine: <strong>Puter.js (gpt-5.4-nano)</strong> — {tunnelConnected ? 'analyzing live camera feed in real-time, threats auto-trigger Telegram + Twilio' : 'runs entirely in your browser, no API keys needed'}
           </div>
         )}
       </div>
