@@ -488,51 +488,131 @@ function AuraVision({ detections, lastDetection, setLastDetection, onDetect, use
     }
   }, [onDetect, setLastDetection])
 
+  const pollIntervalRef = useRef(null)
+
+  // ── REST Polling fallback (more reliable than WS through tunnels) ──
+  const startPolling = useCallback((baseUrl) => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
+    
+    let lastTimestamp = ''
+    setAnalysisLog(`📡 Polling live feed from ${baseUrl}...`)
+    
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${baseUrl}/api/vision/latest-frame`, { 
+          headers: { 'bypass-tunnel-reminder': 'true' }
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        
+        if (data.success && data.has_frame && data.timestamp !== lastTimestamp) {
+          lastTimestamp = data.timestamp
+          setStreamStatus('live')
+          setFrameCount(c => c + 1)
+          
+          const canvas = canvasRef.current
+          if (canvas && data.frame) {
+            const ctx = canvas.getContext('2d')
+            const img = new Image()
+            img.onload = () => {
+              canvas.width = img.width || 640
+              canvas.height = img.height || 480
+              ctx.drawImage(img, 0, 0)
+              if (data.detection?.bbox?.length === 4) {
+                const [x1, y1, x2, y2] = data.detection.bbox
+                ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3
+                ctx.strokeRect(x1*(canvas.width/640), y1*(canvas.height/480), (x2-x1)*(canvas.width/640), (y2-y1)*(canvas.height/480))
+              }
+            }
+            img.src = 'data:image/jpeg;base64,' + data.frame
+          }
+          
+          if (data.detection) {
+            setLastDetection(prev => {
+              const now = Date.now()
+              const lastWasCritical = prev && prev.severity !== 'safe'
+              const justHappened = prev?.lastUpdate && (now - prev.lastUpdate < 5000)
+              if (data.detection.severity === 'safe' && lastWasCritical && justHappened) return prev
+              return { ...data.detection, lastUpdate: now }
+            })
+            if (data.detection.severity !== 'safe') onDetect && onDetect()
+          }
+
+          if (data.detection && data.detection.severity !== 'safe') {
+            setAnalysisLog(`🚨 THREAT DETECTED: ${data.detection.label} (${data.detection.severity}) — ${data.detections_count} total detections`)
+          } else {
+            setAnalysisLog(`📡 Live feed active · Frame received · ${data.detections_count || 0} detections`)
+          }
+        } else if (!data.has_frame) {
+          setStreamStatus('no_phone')
+          setAnalysisLog('📡 Connected to backend. Open /camera on your phone to start streaming.')
+        }
+      } catch (err) {
+        console.log('[AURA Poll] Error:', err.message)
+      }
+    }, 600) // Poll every 600ms
+  }, [onDetect, setLastDetection])
+
   // ── Connect to tunnel (used in cloud mode) ──
   const connectToTunnel = useCallback(() => {
-    // Clean up existing connection
+    // Clean up existing connections
     if (wsRef.current) { try { wsRef.current.close() } catch {} }
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
 
     const cleanUrl = tunnelUrl.replace(/\/+$/, '') // strip trailing slash
     localStorage.setItem('aura_tunnel_url', cleanUrl)
 
-    // Convert http(s) URL to ws(s) URL
-    const wsUrl = cleanUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/ws/dashboard'
-    console.log('[AURA] Connecting to tunnel WS:', wsUrl)
     setStreamStatus('connecting')
+    setTunnelConnected(true)
     setAnalysisLog(`Connecting to ${cleanUrl}...`)
+
+    // Try WebSocket first, then fall back to REST polling
+    const wsUrl = cleanUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/ws/dashboard'
+    console.log('[AURA] Trying tunnel WS:', wsUrl)
 
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
+    let wsConnected = false
+
+    // If WS doesn't connect in 4 seconds, fall back to polling
+    const wsFallbackTimer = setTimeout(() => {
+      if (!wsConnected) {
+        console.log('[AURA] WS timeout, falling back to REST polling')
+        try { ws.close() } catch {}
+        startPolling(cleanUrl)
+      }
+    }, 4000)
 
     ws.onopen = () => {
+      wsConnected = true
+      clearTimeout(wsFallbackTimer)
       setStreamStatus('no_phone')
-      setTunnelConnected(true)
-      setAnalysisLog(`✅ Connected to backend via tunnel! Waiting for phone camera feed...`)
+      setAnalysisLog(`✅ WebSocket connected! Waiting for phone camera feed...`)
       console.log('[AURA] Tunnel WS connected')
     }
     ws.onmessage = handleWsMessage
-    ws.onerror = (err) => {
-      console.log('[AURA] Tunnel WS error:', err)
-      setAnalysisLog(`❌ Connection failed. Make sure backend + localtunnel are running, and you've clicked "Continue" on the localtunnel page.`)
-    }
-    ws.onclose = () => {
-      console.log('[AURA] Tunnel WS closed')
-      if (tunnelConnected) {
-        setStreamStatus('disconnected')
-        setAnalysisLog('⚠️ Tunnel disconnected. Attempting reconnect in 5s...')
-        reconnectTimerRef.current = setTimeout(() => {
-          if (tunnelConnected) connectToTunnel()
-        }, 5000)
+    ws.onerror = () => {
+      if (!wsConnected) {
+        clearTimeout(wsFallbackTimer)
+        console.log('[AURA] WS failed, switching to REST polling')
+        startPolling(cleanUrl)
       }
     }
-  }, [tunnelUrl, tunnelConnected, handleWsMessage])
+    ws.onclose = () => {
+      if (wsConnected) {
+        // Was connected via WS, switch to polling
+        console.log('[AURA] WS dropped, switching to REST polling')
+        startPolling(cleanUrl)
+      }
+    }
+  }, [tunnelUrl, handleWsMessage, startPolling])
 
   const disconnectTunnel = useCallback(() => {
     setTunnelConnected(false)
     if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+    if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null }
     setStreamStatus('cloud')
     setAnalysisLog('')
     setFrameCount(0)
