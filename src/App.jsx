@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import './index.css'
+import NotificationsHub from './NotificationsHub'
 
 // ── Environment Detection ──
 const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
@@ -224,6 +225,7 @@ function Sidebar({ activeSection, onNavigate }) {
     { id: 'cascade', label: 'Cascade Engine', icon: '⚡' },
     { id: 'vision', label: 'AURA Vision', icon: '👁️' },
     { id: 'authority', label: 'Authority Panel', icon: '🛡️' },
+    { id: 'notifications', label: 'Notifications', icon: '🔔' },
     { id: 'guide', label: 'Setup Guide', icon: '📖' },
   ]
 
@@ -1290,7 +1292,7 @@ function App() {
   }
 
   useEffect(() => {
-    const sections = ['dashboard', 'cascade', 'vision', 'authority', 'guide']
+    const sections = ['dashboard', 'cascade', 'vision', 'authority', 'notifications', 'guide']
     const observer = new IntersectionObserver(entries => {
       entries.forEach(entry => {
         if (entry.isIntersecting) setActiveSection(entry.target.id)
@@ -1412,6 +1414,7 @@ function App() {
             />
           )}
           {activeSection === 'authority' && <AuthorityPanel pulse={pulse} cascadeEvents={cascadeEvents} onReport={generateReport} onLockdown={initiateLockdown} onBroadcast={broadcastAlert} />}
+          {activeSection === 'notifications' && <NotificationsHub />}
           {activeSection === 'guide' && <SetupGuide />}
         </main>
       </div>
